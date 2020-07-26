@@ -39,13 +39,13 @@ func init() {
 
 		if v, ok := f.Tag.Lookup("field"); ok {
 			// no need to check for empty since the tag only ever exists or does not
-			fieldSelectors[f.Name] = get_field_selector(v)
-			fmt.Println(f.Name + ": " + get_field_selector(v))
+			fieldSelectors[f.Name] = getFieldSelector(v)
+			fmt.Println(f.Name + ": " + getFieldSelector(v))
 		}
 	}
 }
 
-func get_field_selector(f string) string {
+func getFieldSelector(f string) string {
 	return `div[data-label='` + f + `'] span:nth-child(2)`
 }
 
