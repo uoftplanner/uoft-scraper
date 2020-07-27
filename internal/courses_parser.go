@@ -3,9 +3,17 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/PuerkitoBio/goquery"
 	"github.com/gocolly/colly/v2"
+	"net/http"
 	"reflect"
 	"strings"
+)
+
+const (
+	courseURL     = "https://coursefinder.utoronto.ca/course-search/search/"
+	courseListURL = "https://coursefinder.utoronto.ca/course-search/search/courseSearch/course/search" +
+		"?queryText=&requirements=&campusParam=St.%20George,Scarborough,Mississauga"
 )
 
 type Course struct {
@@ -40,7 +48,6 @@ func init() {
 		if v, ok := f.Tag.Lookup("field"); ok {
 			// no need to check for empty since the tag only ever exists or does not
 			fieldSelectors[f.Name] = getFieldSelector(v)
-			fmt.Println(f.Name + ": " + getFieldSelector(v))
 		}
 	}
 }
@@ -60,47 +67,91 @@ func NewCoursesParser(db *DatabaseHandler) *CoursesParser {
 		course := new(Course)
 
 		if err := e.UnmarshalWithMap(course, fieldSelectors); err != nil {
-			// TODO: proper error handling
 			fmt.Println(err)
 			return
 		}
 
-		title := strings.Split(e.ChildText(".uif-headerText-span"), ":")
-		course.Code = title[0]
-		course.Name = strings.TrimLeft(title[1], " ")
+		//title := strings.Split(e.ChildText(".uif-headerText-span"), ":")
+		course.Code = e.Request.Ctx.Get("code")
+		course.Name = e.Request.Ctx.Get("name")
 
 		if d, err := json.Marshal(course); err == nil {
 			(*db).Put(course.Code, string(d))
 		} else {
-			// TODO: proper error handling
 			fmt.Println(err)
 			return
 		}
-
-		fmt.Println(course.Name)
-		fmt.Println(course.Division)
-		fmt.Println(course.Description)
-		fmt.Println(course.Department)
-		fmt.Println(course.Prerequisites)
-		fmt.Println(course.Corequisites)
-		fmt.Println(course.Level)
-		fmt.Println(course.ArtsScienceBreadth)
-		fmt.Println(course.ArtsScienceDistribution)
-		fmt.Println(course.Campus)
-		fmt.Println(course.Term)
 	})
 
 	return &CoursesParser{c}
 }
 
-func (p *CoursesParser) updateCourse(url string) {
-	if err := p.collector.Visit(url); err != nil {
-		// TODO: proper error handling
+func (p *CoursesParser) updateCourse(path string, code string, name string) {
+	ctx := colly.NewContext()
+
+	ctx.Put("code", code)
+	ctx.Put("name", name)
+
+	err := p.collector.Request(http.MethodGet, courseURL+path, nil, ctx, nil)
+
+	if err != nil {
 		fmt.Println(err)
 	}
 }
 
 func (p *CoursesParser) UpdateData() {
-	// TODO: visit all courses on uoft coursefinder
-	p.updateCourse("https://coursefinder.utoronto.ca/course-search/search/courseInquiry?methodToCall=start&viewId=CourseDetails-InquiryView&courseId=MAT240H1F20209")
+	c := colly.NewCollector(colly.AllowURLRevisit())
+
+	c.OnResponse(func(response *colly.Response) {
+		// the response is a JSON object with only one JSON object 'aaData'
+		var res map[string]interface{}
+
+		if err := json.Unmarshal(response.Body, &res); err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		// aaData is an array of course data
+		aaData := res["aaData"].([]interface{})
+
+		// course data is also stored in an array
+		for _, course := range aaData {
+			data := course.([]interface{})
+			aTag := data[1].(string)
+
+			d, err := goquery.NewDocumentFromReader(strings.NewReader(aTag))
+
+			if err != nil {
+				fmt.Println(err)
+				//continue
+			}
+
+			coursePath, _ := d.Find("a").Attr("href")
+			courseCode := d.Text()
+			courseName := data[2].(string)
+
+			p.updateCourse(coursePath, courseCode, courseName)
+		}
+	})
+
+	c.OnResponseHeaders(func(response *colly.Response) {
+		// if response is successful we do not need to obtain a session and retry
+		if response.StatusCode == 200 {
+			return
+		}
+
+		// retry after obtaining session
+		if err := response.Request.Visit(courseListURL); err != nil {
+			fmt.Println(err)
+		}
+
+		// no need to parse body since we do not have a session
+		response.Request.Abort()
+	})
+
+	if err := c.Visit(courseListURL); err != nil {
+		// failed to retrieve courses
+		fmt.Println(err)
+		return
+	}
 }
