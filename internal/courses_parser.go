@@ -7,6 +7,7 @@ import (
 	"github.com/gocolly/colly/v2"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -61,7 +62,17 @@ type CoursesParser struct {
 }
 
 func NewCoursesParser(db *DatabaseHandler) *CoursesParser {
-	c := colly.NewCollector()
+	c := colly.NewCollector(
+		colly.Async(true),
+	)
+
+	// TODO: option to change concurrent connections and timeout
+	_ = c.Limit(&colly.LimitRule{
+		DomainGlob:  "*",
+		Parallelism: 50,
+	})
+
+	c.DisableCookies()
 
 	c.OnHTML("#correctPage", func(e *colly.HTMLElement) {
 		course := new(Course)
@@ -71,7 +82,6 @@ func NewCoursesParser(db *DatabaseHandler) *CoursesParser {
 			return
 		}
 
-		//title := strings.Split(e.ChildText(".uif-headerText-span"), ":")
 		course.Code = e.Request.Ctx.Get("code")
 		course.Name = e.Request.Ctx.Get("name")
 
@@ -81,6 +91,10 @@ func NewCoursesParser(db *DatabaseHandler) *CoursesParser {
 			fmt.Println(err)
 			return
 		}
+	})
+
+	c.OnError(func(response *colly.Response, err error) {
+		fmt.Println(err.Error())
 	})
 
 	return &CoursesParser{c}
@@ -100,7 +114,10 @@ func (p *CoursesParser) updateCourse(path string, code string, name string) {
 }
 
 func (p *CoursesParser) UpdateData() {
-	c := colly.NewCollector(colly.AllowURLRevisit())
+	c := colly.NewCollector(
+		colly.AllowURLRevisit(),
+		colly.Async(true),
+	)
 
 	c.OnResponse(func(response *colly.Response) {
 		// the response is a JSON object with only one JSON object 'aaData'
@@ -114,6 +131,8 @@ func (p *CoursesParser) UpdateData() {
 		// aaData is an array of course data
 		aaData := res["aaData"].([]interface{})
 
+		fmt.Println("Found " + strconv.Itoa(len(aaData)) + " courses")
+
 		// course data is also stored in an array
 		for _, course := range aaData {
 			data := course.([]interface{})
@@ -123,7 +142,7 @@ func (p *CoursesParser) UpdateData() {
 
 			if err != nil {
 				fmt.Println(err)
-				//continue
+				continue
 			}
 
 			coursePath, _ := d.Find("a").Attr("href")
@@ -154,4 +173,9 @@ func (p *CoursesParser) UpdateData() {
 		fmt.Println(err)
 		return
 	}
+
+	c.Wait()
+
+	// wait until all courses are parsed
+	p.collector.Wait()
 }
