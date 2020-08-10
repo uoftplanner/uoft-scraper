@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/PuerkitoBio/goquery"
+	"github.com/RediSearch/redisearch-go/redisearch"
 	"github.com/gocolly/colly/v2"
 	"net/http"
 	"reflect"
@@ -37,6 +38,7 @@ type Course struct {
 	Term                    string `field:"Term"`
 }
 
+var indexingOptions = redisearch.IndexingOptions{Replace: true, Partial: true}
 var fieldSelectors = make(map[string]string)
 
 func init() {
@@ -59,12 +61,15 @@ func getFieldSelector(f string) string {
 
 type CoursesParser struct {
 	collector *colly.Collector
+	redis     *redisearch.Client
 }
 
-func NewCoursesParser(db *DatabaseHandler) *CoursesParser {
+func NewCoursesParser(rc *redisearch.Client) *CoursesParser {
 	c := colly.NewCollector(
 		colly.Async(true),
 	)
+
+	cp := &CoursesParser{c, rc}
 
 	// TODO: option to change concurrent connections and timeout
 	_ = c.Limit(&colly.LimitRule{
@@ -85,19 +90,31 @@ func NewCoursesParser(db *DatabaseHandler) *CoursesParser {
 		course.Code = e.Request.Ctx.Get("code")
 		course.Name = e.Request.Ctx.Get("name")
 
-		if d, err := json.Marshal(course); err == nil {
-			(*db).Put(course.Code, string(d))
-		} else {
-			fmt.Println(err)
-			return
-		}
+		cp.addCourseToDatabase(course)
 	})
 
 	c.OnError(func(response *colly.Response, err error) {
 		fmt.Println(err.Error())
 	})
 
-	return &CoursesParser{c}
+	return cp
+}
+
+func (p *CoursesParser) addCourseToDatabase(course *Course) {
+	doc := redisearch.NewDocument(course.Code, 1.0)
+
+	if d, err := json.Marshal(course); err == nil {
+		doc.Set("code", course.Code)
+		doc.Set("name", course.Name)
+		doc.Set("json", string(d))
+	} else {
+		fmt.Println(err)
+		return
+	}
+
+	if err := p.redis.IndexOptions(indexingOptions, doc); err != nil {
+		fmt.Println(err)
+	}
 }
 
 func (p *CoursesParser) updateCourse(path string, code string, name string) {
