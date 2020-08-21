@@ -2,10 +2,10 @@ package internal
 
 import (
 	"encoding/json"
-	"fmt"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/RediSearch/redisearch-go/redisearch"
 	"github.com/gocolly/colly/v2"
+	"log"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -19,23 +19,35 @@ const (
 )
 
 type Course struct {
-	Code                    string
-	Name                    string
-	Division                string `field:"Division"`
-	Description             string `field:"Course Description"`
-	Department              string `field:"Department"`
-	Prerequisites           string `field:"Pre-requisites"`
-	Corequisites            string `field:"Corequisite"`
-	Exclusions              string `field:"Exclusion"`
-	RecommendedPreparation  string `field:"Recommended Preparation"`
-	Level                   string `field:"Course Level"`
-	UTSCBreadth             string `field:"UTSC Breadth"`
-	UTMDistribution         string `field:"UTM Distribution"`
-	ArtsScienceBreadth      string `field:"Arts and Science Breadth"`
-	ArtsScienceDistribution string `field:"Arts and Science Distribution"`
-	APSCElectives           string `field:"APSC Electives"`
-	Campus                  string `field:"Campus"`
-	Term                    string `field:"Term"`
+	Code                    string     `json:"code"`
+	Name                    string     `json:"name"`
+	Division                string     `json:"division" field:"Division"`
+	Description             string     `json:"description" field:"Course Description"`
+	Department              string     `json:"department" field:"Department"`
+	Prerequisites           string     `json:"prerequisites" field:"Pre-requisites"`
+	Corequisites            string     `json:"corequisites" field:"Corequisite"`
+	Exclusions              string     `json:"exclusions" field:"Exclusion"`
+	RecommendedPreparation  string     `json:"recommendedPrep" field:"Recommended Preparation"`
+	Level                   string     `json:"level" field:"Course Level"`
+	UTSCBreadth             string     `json:"utscBreadth" field:"UTSC Breadth"`
+	UTMDistribution         string     `json:"utmDistribution" field:"UTM Distribution"`
+	ArtsScienceBreadth      string     `json:"artsSciBreadth" field:"Arts and Science Breadth"`
+	ArtsScienceDistribution string     `json:"artsSciDistribution" field:"Arts and Science Distribution"`
+	APSCElectives           string     `json:"apscElectives" field:"APSC Electives"`
+	Campus                  string     `json:"campus" field:"Campus"`
+	Term                    string     `json:"term" field:"Term"`
+	Schedule                []Activity `json:"schedule"`
+}
+
+type Activity struct {
+	Name       string `json:"name"`
+	DayAndTime string `json:"dayAndTime"`
+	Instructor string `json:"instructor"`
+	Location   string `json:"location"`
+	ClassSize  int    `json:"classSize"`
+	Enrolment  int    `json:"enrolment"`
+	Waitlist   bool   `json:"waitlist"`
+	Delivery   string `json:"delivery"`
 }
 
 var indexingOptions = redisearch.IndexingOptions{Replace: true, Partial: true}
@@ -83,18 +95,50 @@ func NewCoursesParser(rc *redisearch.Client) *CoursesParser {
 		course := new(Course)
 
 		if err := e.UnmarshalWithMap(course, fieldSelectors); err != nil {
-			fmt.Println(err)
+			log.Println(err)
 			return
 		}
 
 		course.Code = e.Request.Ctx.Get("code")
 		course.Name = e.Request.Ctx.Get("name")
 
+		log.Println("Found " + course.Code)
+
+		e.DOM.Find("tbody tr").Each(func(i int, s *goquery.Selection) {
+			columns := s.Children()
+
+			name := strings.TrimSpace(columns.Eq(0).Text())
+			dayAndTime := strings.TrimSpace(columns.Eq(1).Text())
+			instructor := strings.TrimSpace(columns.Eq(2).Text())
+			location := strings.TrimSpace(columns.Eq(3).Text())
+			classSize, _ := strconv.Atoi(strings.TrimSpace(columns.Eq(4).Text()))
+			enrolment, _ := strconv.Atoi(strings.TrimSpace(columns.Eq(5).Text()))
+			waitlist := false
+			delivery := strings.TrimSpace(columns.Eq(7).Text())
+
+			waitlistImage, _ := columns.Eq(6).Find("img").Attr("src")
+
+			if strings.Contains(waitlistImage, "checkmark") {
+				waitlist = true
+			}
+
+			course.Schedule = append(course.Schedule, Activity{
+				name,
+				dayAndTime,
+				instructor,
+				location,
+				classSize,
+				enrolment,
+				waitlist,
+				delivery,
+			})
+		})
+
 		cp.addCourseToDatabase(course)
 	})
 
 	c.OnError(func(response *colly.Response, err error) {
-		fmt.Println(err.Error())
+		log.Println(err.Error())
 	})
 
 	return cp
@@ -108,12 +152,12 @@ func (p *CoursesParser) addCourseToDatabase(course *Course) {
 		doc.Set("name", course.Name)
 		doc.Set("json", string(d))
 	} else {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
 
 	if err := p.redis.IndexOptions(indexingOptions, doc); err != nil {
-		fmt.Println(err)
+		log.Println(err)
 	}
 }
 
@@ -126,7 +170,7 @@ func (p *CoursesParser) updateCourse(path string, code string, name string) {
 	err := p.collector.Request(http.MethodGet, courseURL+path, nil, ctx, nil)
 
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 	}
 }
 
@@ -141,14 +185,14 @@ func (p *CoursesParser) UpdateData() {
 		var res map[string]interface{}
 
 		if err := json.Unmarshal(response.Body, &res); err != nil {
-			fmt.Println(err)
+			log.Println(err)
 			return
 		}
 
 		// aaData is an array of course data
 		aaData := res["aaData"].([]interface{})
 
-		fmt.Println("Found " + strconv.Itoa(len(aaData)) + " courses")
+		log.Println("Found " + strconv.Itoa(len(aaData)) + " courses")
 
 		// course data is also stored in an array
 		for _, course := range aaData {
@@ -158,7 +202,7 @@ func (p *CoursesParser) UpdateData() {
 			d, err := goquery.NewDocumentFromReader(strings.NewReader(aTag))
 
 			if err != nil {
-				fmt.Println(err)
+				log.Println(err)
 				continue
 			}
 
@@ -178,7 +222,7 @@ func (p *CoursesParser) UpdateData() {
 
 		// retry after obtaining session
 		if err := response.Request.Visit(courseListURL); err != nil {
-			fmt.Println(err)
+			log.Println(err)
 		}
 
 		// no need to parse body since we do not have a session
@@ -187,7 +231,7 @@ func (p *CoursesParser) UpdateData() {
 
 	if err := c.Visit(courseListURL); err != nil {
 		// failed to retrieve courses
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
 
